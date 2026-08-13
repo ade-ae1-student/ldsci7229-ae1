@@ -1,8 +1,8 @@
-# LDSCI7229 Advanced Data Engineering — AE1
+# LDSCI7229 Advanced Data Engineering - AE1
 
 Serverless data pipeline integrating batch and streaming sources on AWS.
 
-## Architecture
+## Architecture 
 
 CSV upload and CrossRef API to S3, transformed by Glue, queried through
 Athena, visualised in OpenSearch Dashboards. Orchestrated by Step Functions
