@@ -1,0 +1,154 @@
+{
+  "Comment": "AE1 - Serverless ingestion, catalogue refresh and transformation pipeline",
+  "StartAt": "IngestCrossRefStream",
+  "States": {
+    "IngestCrossRefStream": {
+      "Type": "Task",
+      "Comment": "Fetch newest CrossRef records and push them to Firehose",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:919345804655:function:ade-ae1-crossref-producer",
+        "Payload": {}
+      },
+      "ResultPath": "$.ingestResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Next": "WaitForFirehoseBuffer"
+    },
+    "WaitForFirehoseBuffer": {
+      "Type": "Wait",
+      "Comment": "Firehose buffer interval is 60 seconds; delivery must complete before crawling",
+      "Seconds": 90,
+      "Next": "RefreshCatalog"
+    },
+    "RefreshCatalog": {
+      "Type": "Task",
+      "Comment": "Register new Firehose partitions so the ETL does not read a stale catalogue",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name": "ade-ae1-streaming-crawler"
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.CrawlerRunningException"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Next": "WaitForCrawler"
+    },
+    "WaitForCrawler": {
+      "Type": "Wait",
+      "Comment": "startCrawler is asynchronous; allow the crawl to complete",
+      "Seconds": 60,
+      "Next": "RunGlueETL"
+    },
+    "RunGlueETL": {
+      "Type": "Task",
+      "Comment": "Clean, validate and merge both sources into cleaned/unified_events/",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "ade-ae1-raw-to-cleaned"
+      },
+      "ResultPath": "$.etlResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Next": "RunAthenaSummary"
+    },
+    "PipelineComplete": {
+      "Type": "Succeed"
+    },
+    "PipelineFailed": {
+      "Type": "Fail",
+      "Error": "PipelineExecutionError",
+      "Cause": "Ingestion, catalogue refresh or ETL failed after retries"
+    },
+    "RunAthenaSummary": {
+      "Type": "Task",
+      "Comment": "Summarise the cleaned data; results are written to athena-results/",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Parameters": {
+        "QueryString": "SELECT source, year, COUNT(*) AS event_count, ROUND(AVG(metric_value), 2) AS avg_metric, COUNT(DISTINCT region) AS distinct_regions FROM cleaned_unified_events GROUP BY source, year ORDER BY source, year",
+        "QueryExecutionContext": {
+          "Database": "ade_ae1_datalake_db"
+        },
+        "WorkGroup": "primary",
+        "ResultConfiguration": {
+          "OutputLocation": "s3://ade-ae1-datalake-jd/athena-results/summary/"
+        }
+      },
+      "ResultPath": "$.athenaResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Next": "PipelineComplete"
+    }
+  }
+}
